@@ -123,7 +123,7 @@ int main(int argc, char *argv[]) {
     int rank, procCount;
     MPI_Init(&argc, &argv);
 
-    if (argc < 2) {
+    if (argc < 3) {
         // not enough arguments
         MPI_Finalize();
         return 0;
@@ -167,7 +167,8 @@ int main(int argc, char *argv[]) {
             MPI_Send(&img.width, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
 
             // send pixel lines from the image
-            bounds jobBounds = jobBoundsForProcess(rank, img.height - 2, procCount);
+            bounds jobBounds = jobBoundsForProcess(i, img.height - 2, procCount);
+            printf("---- %i %i\n", jobBounds.begin, jobBounds.end);
             for (int line = jobBounds.begin - 1; line <= jobBounds.end; line++)
                 MPI_Send(&img.pixel[line], img.width, pixelDataType, i, 0, MPI_COMM_WORLD);
         }
@@ -181,7 +182,7 @@ int main(int argc, char *argv[]) {
         numLines = jobBounds.end - jobBounds.begin;
         int pixelSize = imgType == COLOR ? 3 : 1;
 
-        imgBuf = (void **) malloc(numLines + 2 * sizeof(void *));
+        imgBuf = (void **) malloc((numLines + 2) * sizeof(void *));
         for (int i = 0; i <= numLines + 1; i++) {
             imgBuf[i] = malloc(imgWidth * pixelSize);
             MPI_Recv(&imgBuf[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD, NULL);
@@ -204,14 +205,14 @@ int main(int argc, char *argv[]) {
 
     if (rank != 0) {
         // send final results to the master process
-        for (int i = 0; i <= numLines + 1; i++)
+        for (int i = 1; i <= numLines; i++)
             MPI_Send(&imgBuf[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD);
     } else {
         // retrieve and assembly the results
         for (int i = 1; i < procCount; i++) {
-            bounds jobBounds = jobBoundsForProcess(rank, img.height - 2, procCount);
-            for (int line = jobBounds.begin; line <= jobBounds.end; line++)
-                MPI_Recv(&img.pixel[line], img.width, pixelDataType, 0, 0, MPI_COMM_WORLD, NULL);
+            bounds jobBounds = jobBoundsForProcess(i, img.height - 2, procCount);
+            for (int line = jobBounds.begin; line < jobBounds.end; line++)
+                MPI_Recv(&img.pixel[line], img.width, pixelDataType, i, 0, MPI_COMM_WORLD, NULL);
         }
 
         writeImage(outImgName, &img);
