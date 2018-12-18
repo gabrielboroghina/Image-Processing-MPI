@@ -1,4 +1,55 @@
 Gabriel Boroghina
 Grupa 333CB
+
                             Image processing with MPI
+
+
+    Imaginea este retinuta folosind structura image, ce contine tipul imaginii
+(color sau grayscale), dimensiunile, valoarea maxval si o matrice de pixeli
+generici, ce pot fi convertiti la unul din tipurile color_pixel sau grayscale_pixel.
+
+    Functia jobBoundsForProcess determina portiunea din imagine care va fi prelucrata
+de un proces, specificata prin 2 indici begin si end, reprezentand liniile de start
+si de final. Procesul va lucra in intervalul [start, end). Distributia job-urilor
+pentru procese s-a facut astfel incat toate sa aiba acelasi numar de linii de pixeli
+pe care sa aplice filtrele, cu exceptia primelor r, care mai au o linie in plus,
+unde r = restul impartirii inaltimii imaginii la numarul de procese.
+    Pe prima si ultima linie din imagine nu se vor aplica filtre. De asemenea, in
+cadrul unei linii, se vor aplica filtrele pe toti pixelii cu exceptia primului si
+ultimului.
+
 -------------------------------------------------------------------------------
+
+Comunicarea intre procese:
+    La inceput, procesul cu rank-ul 0 (master process) va citi imaginea din fisier,
+iar apoi va trimite fiecarui proces detalii despre imagine (tipul: grayscale/color
+si dimensiunile). Apoi procesul master determina pentru fiecare dintre celelalte
+procese pe ce portiune din imagine va aplica filtrele, si le va trimite acestora
+mesaje cu liniile respective din matricea de pixeli, precum si linia de deasupra
+primei linii si linia de sub ultima linie (sunt necesare pentru aplicarea filtrelor
+pe prima, respectiv ultima linie a portiunii din imagine).
+
+    Pixelii de tip grayscale au fost memorati ca un unsigned char (si, prin urmare,
+transmisi ca MPI_UNSIGNED_CHAR). Pentru a transmite pixelii de tip color, s-a creat
+un nou tip de date MPI, MPI_3UNSIGNED_CHAR, care reprezinta o structura ce contine
+un vector cu 3 elemente de tip unsigned char (reprezentand canalele de culoare red,
+green si blue).
+
+    Toate procesele (inclusiv cel cu rank 0) vor aplica pe rand fiecare filtru dat
+ca input pe portiunea corespunzatoare din imagine. Dupa aplicarea unui filtru,
+procesele vecine (cu rank-urile +/-1) vor folosi MPI_Sendrecv pentru a obtine noile
+valori ale pixelilor de pe liniile aflate la granita (Ex: in cazul a 2 procese
+vecine cu rank-urile r si r+1, procesul r va obtine de la procesul r+1 linia de
+sub ultima linie de procesat, iar procesul r+1 va obtine de la r linia de
+deasupra primei linii pe care o are de procesat).
+
+    Dupa aplicarea tuturor filtrelor, procesele vor trimite catre procesul master
+liniile de pixeli finale, pe care acesta le va asambla in cadrul matricei initiale
+de pixeli, iar apoi va printa imaginea.
+
+    Cantitatea totala de date transmise prin mesaje MPI intre procese este de
+ordinul O(NP + H * W + F * NP * W + H * W) = O((H + F * NP) * W), unde
+    H = inaltimea imaginii
+    W = latimea imaginii
+    NP = numarul de procese
+    F = numarul de filtre ce trebuie aplicate

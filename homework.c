@@ -8,19 +8,13 @@
 #define IMG_TYPE_COLOR 6
 
 typedef struct {
-    float div;
-    float kernel[3][3];
-} filter_type;
-
-typedef struct {
     unsigned char channel[3]; // channel[0] = red, channel[1] = green, channel[2] = blue
 }__attribute__((packed)) color_pixel;
 
 typedef unsigned char grayscale_pixel; // light of the grayscale pixel
 
 typedef struct {
-    int type;
-    int height, width;
+    int type, height, width;
     unsigned char maxval;
     void **pixel;
 } image;
@@ -28,6 +22,11 @@ typedef struct {
 typedef struct {
     int begin, end;
 } bounds;
+
+typedef struct {
+    float div;
+    float kernel[3][3];
+} filter_type;
 
 const filter_type smoothFilter = {9, {{1, 1, 1},
                                       {1, 1, 1},
@@ -102,17 +101,17 @@ void applyFilter(char *filterName, void **img, int imgType, int imgWidth, int nu
     else if (!strcmp(filterName, "emboss"))
         filter = embossFilter;
     else
-        return;
+        return; // unknown filter
 
-    void **imgAux = (void **) malloc((numLines + 1) * sizeof(void *));
+    // initialize auxiliary pixel matrix
     int pixelSize = imgType == IMG_TYPE_COLOR ? 3 : 1;
+    void **imgAux = (void **) malloc((numLines + 1) * sizeof(void *));
     for (int i = 1; i <= numLines; i++)
         imgAux[i] = malloc(imgWidth * pixelSize);
 
     int i, j, l, c;
-    float bw, channel[3];
-
     for (i = 1; i <= numLines; i++) {
+        // copy the ending pixels from the initial image
         if (imgType == IMG_TYPE_GRAYSCALE) {
             ((grayscale_pixel **) imgAux)[i][0] = ((grayscale_pixel **) img)[i][0];
             ((grayscale_pixel **) imgAux)[i][imgWidth - 1] = ((grayscale_pixel **) img)[i][imgWidth - 1];
@@ -121,16 +120,18 @@ void applyFilter(char *filterName, void **img, int imgType, int imgWidth, int nu
             ((color_pixel **) imgAux)[i][imgWidth - 1] = ((color_pixel **) img)[i][imgWidth - 1];
         }
 
+        // apply filter on the others pixels
         for (j = 1; j < imgWidth - 1; j++) {
             if (imgType == IMG_TYPE_GRAYSCALE) {
-                bw = 0;
+                float bw = 0;
                 for (l = -1; l <= 1; l++)
                     for (c = -1; c <= 1; c++)
-                        bw += (filter.kernel[l + 1][c + 1] / filter.div) * ((grayscale_pixel **) img)[i + l][j + c];
+                        bw += (filter.kernel[l + 1][c + 1] / filter.div) *
+                              ((grayscale_pixel **) img)[i + l][j + c];
 
                 ((grayscale_pixel **) imgAux)[i][j] = (unsigned char) bw;
             } else {
-                channel[0] = channel[1] = channel[2] = 0;
+                float channel[3] = {0};
                 for (l = -1; l <= 1; l++)
                     for (c = -1; c <= 1; c++)
                         for (int ch = 0; ch < 3; ch++)
@@ -143,10 +144,15 @@ void applyFilter(char *filterName, void **img, int imgType, int imgWidth, int nu
         }
     }
 
-    for (i = 1; i <= numLines; i++)
+    // replace the old image with the filtered one
+    for (i = 1; i <= numLines; i++) {
+        free(img[i]);
         img[i] = imgAux[i];
+    }
+    free(imgAux);
 }
 
+/** Determine the range of lines which will be processed by the given process. */
 bounds jobBoundsForProcess(int rank, int numLines, int procCount) {
     bounds jobBounds;
     int chunkSize = numLines / procCount;
@@ -158,12 +164,17 @@ bounds jobBoundsForProcess(int rank, int numLines, int procCount) {
     return jobBounds;
 }
 
+void freeImgMem(image *img) {
+    for (int i = 0; i < img->height; i++)
+        free(img->pixel[i]);
+    free(img->pixel);
+}
+
 int main(int argc, char *argv[]) {
     int rank, procCount;
     MPI_Init(&argc, &argv);
 
-    if (argc < 3) {
-        // not enough arguments
+    if (argc < 3) { // not enough arguments
         MPI_Finalize();
         return 0;
     }
@@ -171,12 +182,10 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &procCount);
 
-    char *inImgName = argv[1], *outImgName = argv[2];
     image img;
-    int imgType;
-    int imgHeight, imgWidth, numLines;
+    int imgType, imgHeight, imgWidth, numLines;
+    void **pixelMat; // store the pixel lines assigned to the current process
     bounds jobBounds;
-    void **imgBuf;
     MPI_Datatype pixelDataType;
 
     // create MPI type for color pixel struct
@@ -188,19 +197,19 @@ int main(int argc, char *argv[]) {
     MPI_Type_commit(&MPI_3UNSIGNED_CHAR);
 
     if (rank == 0) { // master process
-        loadImage(inImgName, &img);
+        loadImage(argv[1], &img);
 
         jobBounds = jobBoundsForProcess(rank, img.height - 2, procCount);
         numLines = jobBounds.end - jobBounds.begin;
-        imgBuf = img.pixel; // master process directly uses the pixel matrix
+        pixelMat = img.pixel; // master process directly uses the pixel matrix from img
         pixelDataType = img.type == IMG_TYPE_COLOR ? MPI_3UNSIGNED_CHAR : MPI_UNSIGNED_CHAR;
 
         imgType = img.type;
         imgHeight = img.height;
         imgWidth = img.width;
 
-        // send basic info to the other processes
         for (int i = 1; i < procCount; i++) {
+            // send image properties to the other processes
             MPI_Send(&img.type, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(&img.height, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(&img.width, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
@@ -220,31 +229,35 @@ int main(int argc, char *argv[]) {
         jobBounds = jobBoundsForProcess(rank, imgHeight - 2, procCount);
         numLines = jobBounds.end - jobBounds.begin;
 
-        imgBuf = (void **) malloc((numLines + 2) * sizeof(void *));
+        // receive the pixel lines to be processed
+        pixelMat = (void **) malloc((numLines + 2) * sizeof(void *));
         for (int i = 0; i <= numLines + 1; i++) {
-            imgBuf[i] = malloc(imgWidth * pixelSize);
-            MPI_Recv(imgBuf[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD, NULL);
+            pixelMat[i] = malloc(imgWidth * pixelSize);
+            MPI_Recv(pixelMat[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD, NULL);
         }
     }
 
-    // apply all the filters before sending the final pixel to the master process
+    // apply all the filters before sending the final pixels to the master process
     for (int i = 3; i < argc; i++) {
-        applyFilter(argv[i], imgBuf, imgType, imgWidth, numLines);
+        applyFilter(argv[i], pixelMat, imgType, imgWidth, numLines);
 
         // exchange bounding lines with the neighbor processes
         if (rank > 0)
-            MPI_Sendrecv(imgBuf[1], imgWidth, pixelDataType, rank - 1, 0,
-                         imgBuf[0], imgWidth, pixelDataType, rank - 1, 0, MPI_COMM_WORLD, NULL);
+            MPI_Sendrecv(pixelMat[1], imgWidth, pixelDataType, rank - 1, 0,
+                         pixelMat[0], imgWidth, pixelDataType, rank - 1, 0, MPI_COMM_WORLD, NULL);
 
         if (rank < procCount - 1)
-            MPI_Sendrecv(imgBuf[numLines], imgWidth, pixelDataType, rank + 1, 0,
-                         imgBuf[numLines + 1], imgWidth, pixelDataType, rank + 1, 0, MPI_COMM_WORLD, NULL);
+            MPI_Sendrecv(pixelMat[numLines], imgWidth, pixelDataType, rank + 1, 0,
+                         pixelMat[numLines + 1], imgWidth, pixelDataType, rank + 1, 0, MPI_COMM_WORLD, NULL);
     }
 
     if (rank != 0) {
         // send final results to the master process
-        for (int i = 1; i <= numLines; i++)
-            MPI_Send(imgBuf[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD);
+        for (int i = 1; i <= numLines; i++) {
+            MPI_Send(pixelMat[i], imgWidth, pixelDataType, 0, 0, MPI_COMM_WORLD);
+            free(pixelMat[i]);
+        }
+        free(pixelMat);
     } else {
         // retrieve and assembly the results
         for (int i = 1; i < procCount; i++) {
@@ -253,7 +266,8 @@ int main(int argc, char *argv[]) {
                 MPI_Recv(img.pixel[line], img.width, pixelDataType, i, 0, MPI_COMM_WORLD, NULL);
         }
 
-        writeImage(outImgName, &img);
+        writeImage(argv[2], &img);
+        freeImgMem(&img);
     }
 
     MPI_Finalize();
